@@ -1,0 +1,105 @@
+name: hermes-emotion
+version: 0.1.0
+description: "给 Hermes 一个会变化的情绪：四轴分数 → 16 格确定性人设，状态跳变时后台续写一段。不改 SOUL.md、不破前缀缓存、不阻塞对话。"
+author: "isKoge"
+license: MIT
+kind: standalone
+manifest_version: 2
+requires_hermes: ">=0.21.7"
+tags: [persona, emotion, companion, prompt-cache]
+provides_hooks:
+  - pre_llm_call
+config_schema:
+  enabled:
+    type: bool
+    default: true
+    description: "总开关。关掉后不注入任何内容，状态保留。"
+  state_source:
+    type: str
+    default: json
+    enum: [json, sqlite, manual]
+    description: "分数来源：json（外部文件）/ sqlite（外部库）/ manual（只用 /emotion set）。"
+  state_path:
+    type: str
+    default: ""
+    description: "插件自己的状态文件。留空使用 Hermes 的 plugin-data 目录。"
+  external_state_path:
+    type: str
+    default: ""
+    description: "state_source 为 json/sqlite 时读取的外部状态文件。留空则只用插件内存储的分数。"
+  sqlite_table:
+    type: str
+    default: emotion_engine
+    description: "state_source=sqlite 时读取的表名；列名按 aff/sec/aro/dom（可选 rifts/stage/days_since/atmosphere）。"
+  decay_per_turn:
+    type: float
+    default: 0.0
+    description: "每轮对分数的自然衰减比例，0 表示不衰减。"
+  rifts_threshold:
+    type: float
+    default: 20
+    description: "外部输入里 rifts 超过该值时，追加一句「有些事一直没放下」。"
+  narrator_provider:
+    type: str
+    default: ""
+    description: "生成续写的 provider。留空沿用用户当前使用的模型（推荐）。"
+  narrator_model:
+    type: str
+    default: ""
+    description: "生成续写的模型。留空沿用用户当前使用的模型。"
+  narrator_timeout_s:
+    type: float
+    default: 20
+    description: "续写调用超时；超时静默降级，不影响当轮回复。"
+  axis_delta:
+    type: float
+    default: 15
+    description: "相对上次成功续写的累计变化达到该值才重新生成。"
+  cooldown_hours:
+    type: float
+    default: 6
+    description: "两次成功续写之间的最小间隔。"
+  refresh_days:
+    type: float
+    default: 7
+    description: "超过该天数未续写则强制生成一次。"
+  retry_seconds:
+    type: float
+    default: 60
+    description: "失败后的重试间隔，避免每轮都打模型。"
+  max_increments:
+    type: int
+    default: 3
+    description: "注入里保留的历史续写条数上限。"
+  aff_high:
+    type: float
+    default: 20
+    description: "好感判「近」的门槛"
+  aff_low:
+    type: float
+    default: -20
+    description: "好感判「远」的门槛"
+  sec_high:
+    type: float
+    default: 30
+    description: "安全感判「稳」的门槛"
+  sec_low:
+    type: float
+    default: 10
+    description: "安全感判「悬」的门槛"
+  aro_high:
+    type: float
+    default: 30
+    description: "唤醒判「热」的门槛"
+  aro_low:
+    type: float
+    default: 12
+    description: "唤醒判「静」的门槛"
+  dom_high:
+    type: float
+    default: 10
+    description: "支配判「进」的门槛"
+  dom_low:
+    type: float
+    default: -10
+    description: "支配判「收」的门槛"

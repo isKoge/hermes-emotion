@@ -24,8 +24,10 @@ from typing import Any, Dict, Optional
 
 try:  # loaded as a package by Hermes
     from . import emotion_grid as G
+    from . import emotion_engine as E
 except ImportError:  # loaded flat by pytest / a plain python session
     import emotion_grid as G  # type: ignore[no-redef]
+    import emotion_engine as E  # type: ignore[no-redef]
 
 logger = logging.getLogger("hermes.plugins.hermes-emotion")
 
@@ -129,7 +131,7 @@ def pre_llm_call(session_id: str = "", user_message: str = "", conversation_hist
                  is_first_turn: bool = False, model: str = "", platform: str = "",
                  **kwargs: Any):
     try:
-        return _inject(session_id or "default", user_message or "")
+        return _inject(None, session_id or "default", user_message or "")
     except Exception:
         logger.exception("[emotion] injection failed; skipping this turn")
         return None
@@ -207,17 +209,33 @@ def register(ctx: Any) -> None:
 
 def _inject(ctx: Any, session_id: str, user_message: str) -> Optional[Dict[str, str]]:
     path = _state_path(ctx)
-    source = str(_cfg(ctx, "state_source", "json") or "json")
+    source = str(_cfg(ctx, "state_source", "internal") or "internal")
     external = Path(str(_cfg(ctx, "external_state_path", "") or "")).expanduser() \
         if str(_cfg(ctx, "external_state_path", "") or "").strip() else None
 
     with _LOCK:
         state = G.load_state(path) or G.default_state()
-        state = G.resolve_scores(
-            state, source=source, path=external,
-            decay_per_turn=float(_cfg(ctx, "decay_per_turn", 0.0) or 0.0),
-            sqlite_table=str(_cfg(ctx, "sqlite_table", "emotion_engine") or "emotion_engine"),
-        )
+        engine_failed = False
+        if source == "internal":
+            try:
+                raw_decay = _cfg(ctx, "engine_decay", E.DEFAULT_ENGINE_DECAY)
+                if raw_decay is None or raw_decay == "":
+                    engine_decay = E.DEFAULT_ENGINE_DECAY
+                else:
+                    try:
+                        engine_decay = float(raw_decay)
+                    except (TypeError, ValueError):
+                        engine_decay = E.DEFAULT_ENGINE_DECAY
+                state = E.step(state, user_message, now_ts=G.now_ts(), engine_decay=engine_decay)
+            except Exception:
+                logger.exception("[emotion] internal engine step failed; keeping state")
+                engine_failed = True
+        else:
+            state = G.resolve_scores(
+                state, source=source, path=external,
+                decay_per_turn=float(_cfg(ctx, "decay_per_turn", 0.0) or 0.0),
+                sqlite_table=str(_cfg(ctx, "sqlite_table", "emotion_engine") or "emotion_engine"),
+            )
         scores = [float(state["scores"].get(k, 0.0)) for k in ("aff", "sec", "aro", "dom")]
         previous = tuple(state["coords"]) if state.get("coords") else None
         if previous and len(previous) != 4:
@@ -240,23 +258,29 @@ def _inject(ctx: Any, session_id: str, user_message: str) -> Optional[Dict[str, 
 
         narrative = state.setdefault("narrative", {})
         max_increments = int(_cfg(ctx, "max_increments", 3) or 3)
-        stale = bool(narrative.get("increments")) and narrative.get("last_signature") not in ("", sig)
-        block = G.build_block(state["base_text"], narrative.get("increments") or [],
-                              max_increments, stale=stale)
-
-        trigger = G.should_generate(
-            narrative, sig, scores, G.now_ts(),
-            axis_delta=float(_cfg(ctx, "axis_delta", 15) or 15),
-            cooldown_seconds=float(_cfg(ctx, "cooldown_hours", 6) or 6) * 3600.0,
-            refresh_seconds=float(_cfg(ctx, "refresh_days", 7) or 7) * 86400.0,
-            retry_seconds=float(_cfg(ctx, "retry_seconds", 60) or 60),
-        )
         token = ""
         prompt = ""
-        if trigger:
-            token = f"{session_id}-{int(G.now_ts() * 1000)}"
-            narrative["pending"] = token
-            prompt = G.narrator_prompt(coords, mods, _first_line(user_message))
+
+        if engine_failed:
+            # Degrade to fixed base block only, skip narrator scheduling
+            block = G.build_block(state["base_text"], [])
+            trigger = False
+        else:
+            stale = bool(narrative.get("increments")) and narrative.get("last_signature") not in ("", sig)
+            block = G.build_block(state["base_text"], narrative.get("increments") or [],
+                                  max_increments, stale=stale)
+            trigger = G.should_generate(
+                narrative, sig, scores, G.now_ts(),
+                axis_delta=float(_cfg(ctx, "axis_delta", 15) or 15),
+                cooldown_seconds=float(_cfg(ctx, "cooldown_hours", 6) or 6) * 3600.0,
+                refresh_seconds=float(_cfg(ctx, "refresh_days", 7) or 7) * 86400.0,
+                retry_seconds=float(_cfg(ctx, "retry_seconds", 60) or 60),
+            )
+            if trigger:
+                token = f"{session_id}-{int(G.now_ts() * 1000)}"
+                narrative["pending"] = token
+                prompt = G.narrator_prompt(coords, mods, _first_line(user_message))
+
         G.save_state(path, state)
 
     if trigger:

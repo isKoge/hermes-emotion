@@ -115,12 +115,13 @@ python -m pytest tests/ -q
 | 键 | 默认 | 作用 |
 |---|---|---|
 | `enabled` | `true` | 总开关 |
-| `state_source` | `json` | `json` / `sqlite` / `manual` |
+| `state_source` | `internal` | `internal`（默认，内置引擎） / `json` / `sqlite` / `manual` |
+| `engine_decay` | `0.05` | 内置引擎每轮对分数的自然衰减比例（好感为正衰减慢，为负回落快） |
 | `state_path` | 空 | 插件自己的状态文件，留空用 plugin-data 目录 |
 | `external_state_path` | 空 | 外部分数文件（`state_source=json` 时读它） |
 | `sqlite_table` | `emotion_engine` | `state_source=sqlite` 时读的表名 |
-| `decay_per_turn` | `0` | 每轮自然衰减比例 |
-| `rifts_threshold` | `20` | 外部 `rifts` 超过该值追加"没放下"那句 |
+| `decay_per_turn` | `0` | 每轮自然衰减比例（外部源模式下生效） |
+| `rifts_threshold` | `20` | `rifts` 超过该值追加"没放下"那句 |
 | `narrator_provider` | 空 | 留空 = 用你当前的模型（推荐） |
 | `narrator_model` | 空 | 同上 |
 | `narrator_timeout_s` | `20` | 超时静默降级 |
@@ -129,26 +130,104 @@ python -m pytest tests/ -q
 | `refresh_days` | `7` | 超过则强制刷新一次 |
 | `retry_seconds` | `60` | 失败后的重试间隔 |
 | `max_increments` | `3` | 注入里保留的历史段数 |
-| `aff_high` / `aff_low` | `20` / `-20` | 好感判定门槛 |
-| `sec_high` / `sec_low` | `30` / `10` | 安全感判定门槛 |
-| `aro_high` / `aro_low` | `30` / `12` | 唤醒判定门槛 |
-| `dom_high` / `dom_low` | `10` / `-10` | 支配判定门槛 |
+| `aff_high` / `aff_low` | `8` / `-8` | 好感判定门槛 |
+| `sec_high` / `sec_low` | `18` / `5` | 安全感判定门槛 |
+| `aro_high` / `aro_low` | `18` / `5` | 唤醒判定门槛 |
+| `dom_high` / `dom_low` | `6` / `-6` | 支配判定门槛 |
 
 ### 分数从哪来
 
-插件不绑定任何情感引擎，三种接法：
+**默认自带内置情绪引擎**（`state_source=internal`），无需任何外部服务或配置文件，装完即用。
+现有的三种外部数据源依然完整支持，作为可选接入方式：
 
 | `state_source` | 用法 |
 |---|---|
-| `json` | 别的程序/插件往一个 JSON 写四个分数，本插件只读 |
-| `sqlite` | 指向外部库（同样的四列） |
-| `manual` | 不自动更新，用命令手动设 |
+| `internal` | **默认**。内置情绪引擎，规则识别当轮消息事件（夸赞/道歉/示弱/调侃/冷淡/伤人/重聚等），自动维护四轴情绪、衰减与关系阶段 |
+| `json` | 可选外部源。别的程序/插件往一个 JSON 写四个分数，本插件只读 |
+| `sqlite` | 可选外部源。指向外部 SQLite 数据库读取最新一行记录 |
+| `manual` | 纯手动。不自动更新，用命令手动设分 |
 
-外部 JSON 的形状：
+外部 JSON 的形状（外部源模式下）：
 
 ```json
 { "aff": 60, "sec": 20, "aro": 25, "dom": 5,
   "rifts": 0, "stage": "FAMILIAR", "days_since": 120, "atmosphere": "warm" }
+```
+
+### 内置引擎实跑效果（零配置，前 10 轮真实运行记录）
+
+默认 `state_source=internal`，不接任何外部分数源，从第一条消息开始跑出来的结果：
+
+```text
+Turn 01:
+  User: "你好啊，今天开始请多关照！"
+  Event: plain | Stage: STRANGER | Trust: 0.5 | Rifts: 0.0 | Atmosphere: neutral
+  Scores: aff=+2.0, sec=+1.0, aro=+3.0, dom=+0.0
+  Grid: [近·悬·静·进]
+  Injected: 我对他还是热乎的，只是没底，就轻轻问一句他在忙什么。
+
+Turn 02:
+  User: "你刚才帮我整理的方案太棒了，真厉害！"
+  Event: praise | Stage: STRANGER | Trust: 4.5 | Rifts: 0.0 | Atmosphere: warm
+  Scores: aff=+26.9, sec=+22.9, aro=+37.8, dom=+12.0
+  Grid: [近·稳·热·进]
+  Injected: 我心情好得藏不住，就想凑到跟前，让他看我一眼。
+
+Turn 03:
+  User: "今天加班好累，心里好难受……"
+  Event: vulnerability | Stage: STRANGER | Trust: 9.5 | Rifts: 0.0 | Atmosphere: warm
+  Scores: aff=+43.8, sec=+33.1, aro=+18.7, dom=+23.0
+  Grid: [近·稳·热·进]
+  Injected: 我心情好得藏不住，就想凑到跟前，让他看我一眼。
+
+Turn 04:
+  User: "嗯"
+  Event: cold | Stage: STRANGER | Trust: 7.5 | Rifts: 0.0 | Atmosphere: warm
+  Scores: aff=+17.1, sec=+12.4, aro=+1.2, dom=+9.2
+  Grid: [近·稳·静·进]
+  Injected: 我踏实得很，慢慢挪过去挨着他坐，不着急说话。
+
+Turn 05:
+  User: "随便吧"
+  Event: cold | Stage: STRANGER | Trust: 5.5 | Rifts: 0.0 | Atmosphere: cool
+  Scores: aff=-8.6, sec=-6.6, aro=-14.9, dom=-3.5
+  Grid: [远·悬·静·进]
+  Injected: 我冷着，账我记着，等他哪天自己撞上来。屋里现在是凉的。
+
+Turn 06:
+  User: "你根本不懂我在说什么。"
+  Event: criticism | Stage: STRANGER | Trust: 0.0 | Rifts: 15.0 | Atmosphere: cool
+  Scores: aff=-42.6, sec=-31.0, aro=+1.3, dom=-25.3
+  Grid: [远·悬·静·收]
+  Injected: 我不想说话，缩在一边，等他先开口。屋里现在是凉的。
+
+Turn 07:
+  User: "呵呵"
+  Event: cold | Stage: STRANGER | Trust: 0.0 | Rifts: 15.0 | Atmosphere: cool
+  Scores: aff=-62.5, sec=-46.5, aro=-14.8, dom=-35.2
+  Grid: [远·悬·静·收]
+  Injected: 我不想说话，缩在一边，等他先开口。屋里现在是凉的。
+
+Turn 08:
+  User: "对不起，刚才是我情绪太差，是我不好。"
+  Event: apology | Stage: STRANGER | Trust: 3.0 | Rifts: 5.0 | Atmosphere: cool
+  Scores: aff=-40.0, sec=-24.8, aro=-28.6, dom=-44.4
+  Grid: [远·悬·静·收]
+  Injected: 我不想说话，缩在一边，等他先开口。屋里现在是凉的。
+
+Turn 09:
+  User: "谢谢你一直陪着我，你真好。"
+  Event: praise | Stage: STRANGER | Trust: 7.0 | Rifts: 5.0 | Atmosphere: neutral
+  Scores: aff=-10.2, sec=-0.8, aro=+8.7, dom=-28.9
+  Grid: [远·悬·静·收]
+  Injected: 我不想说话，缩在一边，等他先开口。
+
+Turn 10:
+  User: "隔了这么久，好久不见啊！"
+  Event: reunion | Stage: FAMILIAR | Trust: 10.0 | Rifts: 5.0 | Atmosphere: neutral
+  Scores: aff=+11.1, sec=-12.8, aro=+26.0, dom=-36.6
+  Grid: [近·悬·热·收]
+  Injected: 我特别想凑过去，一想到他可能嫌我黏，话又咽回去了。
 ```
 
 ### 命令

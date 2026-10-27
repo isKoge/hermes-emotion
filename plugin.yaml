@@ -1,5 +1,5 @@
 name: hermes-emotion
-version: 0.1.0
+version: 0.2.0
 description: "给 Hermes 一个会变化的情绪：四轴分数 → 16 格确定性人设，状态跳变时后台续写一段。不改 SOUL.md、不破前缀缓存、不阻塞对话。"
 author: "isKoge"
 license: MIT
@@ -16,9 +16,13 @@ config_schema:
     description: "总开关。关掉后不注入任何内容，状态保留。"
   state_source:
     type: str
-    default: json
-    enum: [json, sqlite, manual]
-    description: "分数来源：json（外部文件）/ sqlite（外部库）/ manual（只用 /emotion set）。"
+    default: internal
+    enum: [internal, json, sqlite, manual]
+    description: "分数来源：internal（插件内置情绪引擎，装完即用）/ json（外部文件）/ sqlite（外部库）/ manual（只用 /emotion set）。"
+  engine_decay:
+    type: float
+    default: 0.05
+    description: "内置引擎每轮对分数的自然衰减比例（好感为正时衰减更慢，为负时回落更快）。"
   state_path:
     type: str
     default: ""

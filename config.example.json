@@ -1,6 +1,7 @@
 {
   "enabled": true,
-  "state_source": "json",
+  "state_source": "internal",
+  "engine_decay": 0.05,
   "state_path": "",
   "external_state_path": "~/.local/share/hermes-emotion/scores.json",
   "decay_per_turn": 0.0,

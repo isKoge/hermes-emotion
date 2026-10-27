@@ -42,10 +42,10 @@ GRID_TEXTS: Dict[Coords, str] = {
 }
 
 DEFAULT_BANDS = {
-    "aff_high": 20.0, "aff_low": -20.0,
-    "sec_high": 30.0, "sec_low": 10.0,
-    "aro_high": 30.0, "aro_low": 12.0,
-    "dom_high": 10.0, "dom_low": -10.0,
+    "aff_high": 8.0, "aff_low": -8.0,
+    "sec_high": 18.0, "sec_low": 5.0,
+    "aro_high": 18.0, "aro_low": 5.0,
+    "dom_high": 6.0, "dom_low": -6.0,
 }
 
 BLOCK_HEADER = "[我心里的状态]"

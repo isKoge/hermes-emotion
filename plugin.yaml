@@ -1,12 +1,12 @@
 name: hermes-emotion
-version: 0.2.0
-description: "给 Hermes 一个会变化的情绪：四轴分数 → 16 格确定性人设，状态跳变时后台续写一段。不改 SOUL.md、不破前缀缓存、不阻塞对话。"
+version: 0.3.0
+description: "给 Hermes 一个自包含的完整情绪模型：四轴 4D 引擎 + 关系演化 + 16 格人设 + 时间感知 + 天气感知 + 焦点追踪 + 成人模式。状态存入独立库，不依赖外部核心库。"
 author: "isKoge"
 license: MIT
 kind: standalone
 manifest_version: 2
 requires_hermes: ">=0.21.7"
-tags: [persona, emotion, companion, prompt-cache]
+tags: [persona, emotion, companion, prompt-cache, friday-core]
 provides_hooks:
   - pre_llm_call
 config_schema:
@@ -19,6 +19,34 @@ config_schema:
     default: internal
     enum: [internal, json, sqlite, manual]
     description: "分数来源：internal（插件内置情绪引擎，装完即用）/ json（外部文件）/ sqlite（外部库）/ manual（只用 /emotion set）。"
+  adult_enabled:
+    type: bool
+    default: true
+    description: "成人模式开关（普通/暧昧/亲密/余韵状态机，默认开启）。"
+  weather_enabled:
+    type: bool
+    default: true
+    description: "天气感知开关（自动识别城市与日期并注入天气简报）。"
+  focus_enabled:
+    type: bool
+    default: true
+    description: "当前任务焦点栈追踪与注入开关。"
+  episodic_enabled:
+    type: bool
+    default: true
+    description: "情景记忆与情感回响开关。"
+  holidays_enabled:
+    type: bool
+    default: true
+    description: "公历与农历节日感知开关。"
+  engine_db_path:
+    type: str
+    default: ""
+    description: "插件自有 SQLite 状态库路径。留空使用 plugin-data/hermes-emotion/state.db。"
+  legacy_db_path:
+    type: str
+    default: ""
+    description: "旧版 friday_core 数据源路径，用于 /emotion migrate 迁移。"
   engine_decay:
     type: float
     default: 0.05
@@ -26,7 +54,7 @@ config_schema:
   state_path:
     type: str
     default: ""
-    description: "插件自己的状态文件。留空使用 Hermes 的 plugin-data 目录。"
+    description: "兼容 0.2.0 的 JSON 状态文件路径。留空使用 Hermes 的 plugin-data 目录。"
   external_state_path:
     type: str
     default: ""
@@ -77,33 +105,33 @@ config_schema:
     description: "注入里保留的历史续写条数上限。"
   aff_high:
     type: float
-    default: 20
+    default: 8
     description: "好感判「近」的门槛"
   aff_low:
     type: float
-    default: -20
+    default: -8
     description: "好感判「远」的门槛"
   sec_high:
     type: float
-    default: 30
+    default: 18
     description: "安全感判「稳」的门槛"
   sec_low:
     type: float
-    default: 10
+    default: 5
     description: "安全感判「悬」的门槛"
   aro_high:
     type: float
-    default: 30
+    default: 18
     description: "唤醒判「热」的门槛"
   aro_low:
     type: float
-    default: 12
+    default: 5
     description: "唤醒判「静」的门槛"
   dom_high:
     type: float
-    default: 10
+    default: 6
     description: "支配判「进」的门槛"
   dom_low:
     type: float
-    default: -10
+    default: -6
     description: "支配判「收」的门槛"

@@ -1,254 +1,172 @@
 # hermes-emotion
 
-> 给 Hermes 加一个**会变化的情绪**。
+> **一个插件即完整情绪模型**。自包含、纯净、开箱即用。
 
-Hermes 的人格是静态的：`SOUL.md` 写一次，之后每轮都一样。刚被夸、刚拌过嘴、三天没说话，说出来的话一模一样。
+Hermes 的默认人格往往是静态的：`SOUL.md` 写一次，之后每轮都一样。
+`hermes-emotion` 将一套完整、拟真、具备时间感知与动态演化的情绪伴侣模型封装为一个独立的纯 Hermes 插件。
 
-这个插件补的是中间那一层：**一种会随相处变化、又不会把语气搞崩的情绪状态**。
+只装这一个插件，不依赖任何第三方重量级服务，就能提供深度情感陪伴所需要的一切能力：
+- **四轴 4D 情绪动力学引擎**（好感 / 安全感 / 唤醒 / 支配 13 步递推演化）
+- **动态关系推进体系**（初识 / 熟识 / 亲密 三阶段跃迁、信任积累、裂痕修复、氛围演化）
+- **确定性 16 格人设矩阵**（Deterministic Grid + 滞回门槛 + 异步增量叙事）
+- **时间感知与重聚**（时间感知、节假日识别、相识天数深度、长离线重聚加成）
+- **天气感知**（基于对白意图自动识别城市与日期，接入 Open-Meteo 天气简报，可开可关）
+- **焦点栈追踪**（多轮任务上下文连续追踪，区分活跃/挂起/未决任务）
+- **情景记忆与记忆回响**（对话轮次总结与长周期情感记忆反哺）
+- **成人模式状态机**（普通 / 暧昧 / 亲密 / 余韵 交互状态机与欲望预算管控，默认开启）
 
-它不替换人格，不改 system prompt，不动 `SOUL.md`；只在当轮用户消息后面补一段第一人称的状态自述，让模型知道自己"此刻是什么感觉"。
+全部状态持久化存储在插件自有的 SQLite 数据库（`plugin-data/hermes-emotion/state.db`），**绝不读写宿主核心数据库**，实现彻底的存储解耦与数据安全。
 
 ---
 
-## 一、装之前 vs 装之后
+## 一、与 friday_core 的关系
 
-同一份 `SOUL.md`，同样一句「今天有点累」：
+本插件的整套算法模型源自 `friday_core` 经过数月真实对话打磨成熟的情绪与陪伴架构。
 
-**装之前**
+在以往架构中，`friday_core` 的情绪表深度耦合在宿主核心数据库中，且依赖庞大的外围链路。`hermes-emotion`（v0.3.0）完成了彻底的解耦重构：
+1. **纯自包含**：所有模块（`engine/`）全部搬迁入内，无任何对 `friday_core` 的引用。
+2. **存储隔离**：建立专属数据库连接助手（WAL 模式、busy_timeout、线程安全），状态落盘于 `~/.hermes/plugin-data/hermes-emotion/state.db`。
+3. **数据无损继承**：提供一键式幂等迁移工具，旧版数据一键平滑搬迁。
+4. **注入内容对齐**：标准五段式顺序注入，完全保留原汁原味的心情与交互体验。
+
+---
+
+## 二、真实运行输出展示
+
+以下为插件在测试环境中真实运行产生的实际输出（非人工编造）：
+
+### 1. 对话注入文本（`pre_llm_call` 实际注入 context）
+
+用户输入：`广州明天天气怎么样，今天加班好累好想你，想要抱抱你亲一下`
 
 ```text
-用户：今天有点累
-助手：辛苦了，要不要先歇一会儿？
-```
-
-**装之后**（插件注入的两段状态，出现在不同情境）
-
-```text
+时间: 工作日 傍晚 · 秋天
+相识: 刚认识不久 (0天)
 [我心里的状态]
-我心里烧得慌，又没底，想立刻问清楚他到底怎么想。
-中间有些事我一直没放下。我们该熟了，可界面上还写着初识。
+我对他还是热乎的，可心里一直悬着，他一忙我就不知道该往哪站。想凑近，又怕显得太急，所以话到嘴边总收一半。
+[当前焦点]
+- [活跃] 广州明天天气怎么样，今天加班好累好想你，...
+天气: 广州 明天 29°C / 24°C · 多云⛅ · 优
 ```
+
+> **注入顺序说明**（严格按规范排列）：
+> 1. **时间 / 相识 / 重聚**（当前时间、认识天数、特殊节日、重聚好感加成）
+> 2. **[我心里的状态]**（确定性 16 格第一人称心境描写 + 历史增量叙事）
+> 3. **焦点**（当前正在进行或挂起的主题任务）
+> 4. **天气**（识别到地点与时间意图时的天气简报）
+> 5. **成人状态**（仅在非 NORMAL 状态时输出，如 `模式: 暧昧 | 预算: 15/60`）
+
+---
+
+### 2. 交互命令运行输出
+
+#### 查看当前情绪状态 `/emotion`
 
 ```text
-[我心里的状态]
-我心里烧得慌，又没底，我察觉到他的疲惫，便不急着追问。
-今天的气氛是暖的，我安静地应着。
-人设现在变更为：听见你说工作累，我心里不由得软了些，也生出一点想靠近、
-想多了解你的念头。只是那份未解的牵挂仍让我有些悬着，热意悄悄浮起，
-却还收着几分，不敢贸然越过彼此的距离。
+情绪四轴: 好感=7.7 安全感=9.3 唤醒=-0.5 支配=-7.2
+主情绪标签: 平静理性
+关系状态: 阶段=STRANGER 信任=11.0 裂痕=0 氛围=neutral
+初识日期: 2026-10-27 (已相识 0 天)
+成人模式: NORMAL (预算: 0/60)
+存储路径: ~/.hermes/plugin-data/hermes-emotion/state.db
 ```
 
-模型拿到的不是形容词（"温柔黏人"），而是一段它**说得出来**的感受，回复的语气自然跟着变。
-
----
-
-## 二、它是怎么算的
-
-### 1. 情绪是数
-
-四个连续轴，范围都是 `-100 ~ 100`：
-
-| 轴 | 含义 |
-|---|---|
-| `aff` | 好感：亲 / 疏 |
-| `sec` | 安全感：踏实 / 悬着 |
-| `aro` | 唤醒：高能 / 低回 |
-| `dom` | 支配：主动 / 收着 |
-
-### 2. 数值先落成坐标，再落成人设
-
-四轴各二值化 → **16 格**，每格一段写死的两到三句第一人称自述；再叠三条条件修饰（有未解的心结、阶段与相识天数不符、气氛偏冷）。
-
-**映射是确定性的**：同一坐标永远得到同一段文字。
-
-判定带滞回：只有越过边界一段距离才翻转，中间保持在原来那一侧，分数在门槛附近抖动不会让人格来回跳。
-
-### 3. 只有真的变了，才请模型写新的一段
-
-坐标跨格、单轴累计变化超过阈值、或久未更新时，才在**后台**请求一次模型写一段新的自述，写进状态文件，**下一轮**才追加进上下文：
+#### 手动设置四轴分数 `/emotion set <aff> <sec> <aro> <dom>`
 
 ```text
-人设现在变更为：……
+/emotion set 65 25 30 10
+已写入：aff=65 sec=25 aro=30 dom=10
 ```
 
-失败、超时、返回空、超长、含数字或字段名，一律静默降级为只用固定段。当轮回复完全不受影响。
+#### 从旧版 friday_core 一键迁移 `/emotion migrate [legacy_path]`
+
+```text
+/emotion migrate ~/.hermes/legacy_state.db
+✅ [emotion] 迁移完成：共导入 2 行历史数据
+源数据库: /Users/ikoge/.hermes/legacy_state.db (已只读校验)
+目标数据库: /Users/ikoge/.hermes/plugin-data/hermes-emotion/state.db
+表详情:
+  - emotion_engine: 1 行
+  - relationship_state: 1 行
+```
 
 ---
 
-## 三、三条可验证的工程属性
+## 三、一键迁移指南
 
-1. **同状态逐字节相同**——坐标不变时连续 N 轮注入文本完全一致，前缀缓存稳定命中
-2. **不阻塞对话**——模型调用在后台线程，`pre_llm_call` 不等待
-3. **低频**——默认 6 小时冷却 + 15 分变化阈值，正常使用一天只触发几次
+如果你之前使用过 `friday_core`，可以通过内置的迁移工具将历史沉淀的好感度、关系阶段、人格偏好、焦点和情景记忆无损迁入：
+
+### 方式 1：对话内直接运行
+```text
+/emotion migrate
+```
+留空时默认读取 `~/.hermes` 下的旧数据库；也可以显式指定路径：
+```text
+/emotion migrate /path/to/old/state.db
+```
+
+### 方式 2：Python 脚本 / CLI
+```python
+from engine.migrate import migrate_from_legacy
+
+# 旧库严格以只读模式（mode=ro）打开，重复执行幂等安全
+result = migrate_from_legacy(
+    legacy_db_path="~/.hermes/old_state.db",
+    target_db_path="~/.hermes/plugin-data/hermes-emotion/state.db"
+)
+print(result)
+```
+
+**迁移特点**：
+- **安全**：旧库以 URI `mode=ro` 只读打开，绝不改写源文件。
+- **幂等**：基于主键执行 `INSERT OR REPLACE`，重复跑多次行数与内容完全不变。
+- **全表覆盖**：涵盖 `emotion_engine`、`relationship_state`、`personality_state`、`persona_grid_state`、`episodic_memory`、`focus_stack`、`agent_state` 等所有状态表。
 
 ---
 
-## 四、注入到哪里
+## 四、配置开关表（扁平化 config_schema）
 
-- 只追加到**当轮用户消息**（`pre_llm_call` 的官方通道），不改历史、不改 system prompt
-- 同一轮内的多次工具调用复用同一份快照，不会中途换人设
-- 新生成的段落**只影响下一轮**
+所有配置项均可在 `config.json` 或宿主配置面板中直接配置：
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | `bool` | `true` | 插件全局总开关。关闭时不注入任何内容，状态保留 |
+| `state_source` | `str` | `internal` | 分数来源：`internal`（真引擎自算）/ `json` / `sqlite` / `manual` |
+| `adult_enabled` | `bool` | `true` | 成人模式开关（状态机、亲密度、预算，默认开启） |
+| `weather_enabled` | `bool` | `true` | 天气感知开关（根据对话内容自动获取天气） |
+| `focus_enabled` | `bool` | `true` | 任务焦点栈追踪与注入开关 |
+| `episodic_enabled` | `bool` | `true` | 情景记忆与情感回响开关 |
+| `holidays_enabled` | `bool` | `true` | 公历与农历节日感知开关 |
+| `engine_db_path` | `str` | `""` | 自有 SQLite 库路径，留空使用 `plugin-data/hermes-emotion/state.db` |
+| `legacy_db_path` | `str` | `""` | 旧版数据源路径，用于 `/emotion migrate` 默认源 |
+| `engine_decay` | `float` | `0.05` | 每轮对分数的自然衰减比例（正向好感衰减更慢，负向回落更快） |
+| `narrator_provider` | `str` | `""` | 异步人设续写 provider，留空使用当前主对话模型 |
+| `narrator_model` | `str` | `""` | 异步人设续写 model，留空使用当前主对话模型 |
+| `narrator_timeout_s` | `float` | `20` | 续写调用超时秒数，超时静默降级 |
+| `axis_delta` | `float` | `15` | 触发增量续写所需的最小四轴累计变动分值 |
+| `cooldown_hours` | `float` | `6` | 两次成功生成续写之间的冷却小时数 |
+| `refresh_days` | `float` | `7` | 强制刷新续写的最大天数 |
+| `max_increments` | `int` | `3` | 提示词中保留的历史续写最大条数 |
 
 ---
 
-## 五、安装
+## 五、测试与工程验证
+
+运行全量单元测试与插件诊断检查：
 
 ```bash
-hermes plugins install <owner>/hermes-emotion --enable
-```
+# 运行全部单测（40+ 项测试，涵盖存储隔离、迁移幂等、等价性对照、崩溃降级）
+/opt/homebrew/bin/python3.12 -m pytest tests/ -q -p no:cacheprovider
 
-本地目录也可以直接放进 `~/.hermes/plugins/hermes-emotion/`，然后在 `plugins.enabled` 里加上 `hermes-emotion`。
+# 验证核心库隔离性（输出必须为 0）
+grep -rn 'hermes/state.db' --include='*.py' . | wc -l
 
-自检：
-
-```bash
-hermes plugins doctor ~/.hermes/plugins/hermes-emotion
-python -m pytest tests/ -q
-```
-
----
-
-## 六、配置
-
-所有键都是扁平的：
-
-| 键 | 默认 | 作用 |
-|---|---|---|
-| `enabled` | `true` | 总开关 |
-| `state_source` | `internal` | `internal`（默认，内置引擎） / `json` / `sqlite` / `manual` |
-| `engine_decay` | `0.05` | 内置引擎每轮对分数的自然衰减比例（好感为正衰减慢，为负回落快） |
-| `state_path` | 空 | 插件自己的状态文件，留空用 plugin-data 目录 |
-| `external_state_path` | 空 | 外部分数文件（`state_source=json` 时读它） |
-| `sqlite_table` | `emotion_engine` | `state_source=sqlite` 时读的表名 |
-| `decay_per_turn` | `0` | 每轮自然衰减比例（外部源模式下生效） |
-| `rifts_threshold` | `20` | `rifts` 超过该值追加"没放下"那句 |
-| `narrator_provider` | 空 | 留空 = 用你当前的模型（推荐） |
-| `narrator_model` | 空 | 同上 |
-| `narrator_timeout_s` | `20` | 超时静默降级 |
-| `axis_delta` | `15` | 累计变化达阈值才重新生成 |
-| `cooldown_hours` | `6` | 两次成功生成的最小间隔 |
-| `refresh_days` | `7` | 超过则强制刷新一次 |
-| `retry_seconds` | `60` | 失败后的重试间隔 |
-| `max_increments` | `3` | 注入里保留的历史段数 |
-| `aff_high` / `aff_low` | `8` / `-8` | 好感判定门槛 |
-| `sec_high` / `sec_low` | `18` / `5` | 安全感判定门槛 |
-| `aro_high` / `aro_low` | `18` / `5` | 唤醒判定门槛 |
-| `dom_high` / `dom_low` | `6` / `-6` | 支配判定门槛 |
-
-### 分数从哪来
-
-**默认自带内置情绪引擎**（`state_source=internal`），无需任何外部服务或配置文件，装完即用。
-现有的三种外部数据源依然完整支持，作为可选接入方式：
-
-| `state_source` | 用法 |
-|---|---|
-| `internal` | **默认**。内置情绪引擎，规则识别当轮消息事件（夸赞/道歉/示弱/调侃/冷淡/伤人/重聚等），自动维护四轴情绪、衰减与关系阶段 |
-| `json` | 可选外部源。别的程序/插件往一个 JSON 写四个分数，本插件只读 |
-| `sqlite` | 可选外部源。指向外部 SQLite 数据库读取最新一行记录 |
-| `manual` | 纯手动。不自动更新，用命令手动设分 |
-
-外部 JSON 的形状（外部源模式下）：
-
-```json
-{ "aff": 60, "sec": 20, "aro": 25, "dom": 5,
-  "rifts": 0, "stage": "FAMILIAR", "days_since": 120, "atmosphere": "warm" }
-```
-
-### 内置引擎实跑效果（零配置，前 10 轮真实运行记录）
-
-默认 `state_source=internal`，不接任何外部分数源，从第一条消息开始跑出来的结果：
-
-```text
-Turn 01:
-  User: "你好啊，今天开始请多关照！"
-  Event: plain | Stage: STRANGER | Trust: 0.5 | Rifts: 0.0 | Atmosphere: neutral
-  Scores: aff=+2.0, sec=+1.0, aro=+3.0, dom=+0.0
-  Grid: [近·悬·静·进]
-  Injected: 我对他还是热乎的，只是没底，就轻轻问一句他在忙什么。
-
-Turn 02:
-  User: "你刚才帮我整理的方案太棒了，真厉害！"
-  Event: praise | Stage: STRANGER | Trust: 4.5 | Rifts: 0.0 | Atmosphere: warm
-  Scores: aff=+26.9, sec=+22.9, aro=+37.8, dom=+12.0
-  Grid: [近·稳·热·进]
-  Injected: 我心情好得藏不住，就想凑到跟前，让他看我一眼。
-
-Turn 03:
-  User: "今天加班好累，心里好难受……"
-  Event: vulnerability | Stage: STRANGER | Trust: 9.5 | Rifts: 0.0 | Atmosphere: warm
-  Scores: aff=+43.8, sec=+33.1, aro=+18.7, dom=+23.0
-  Grid: [近·稳·热·进]
-  Injected: 我心情好得藏不住，就想凑到跟前，让他看我一眼。
-
-Turn 04:
-  User: "嗯"
-  Event: cold | Stage: STRANGER | Trust: 7.5 | Rifts: 0.0 | Atmosphere: warm
-  Scores: aff=+17.1, sec=+12.4, aro=+1.2, dom=+9.2
-  Grid: [近·稳·静·进]
-  Injected: 我踏实得很，慢慢挪过去挨着他坐，不着急说话。
-
-Turn 05:
-  User: "随便吧"
-  Event: cold | Stage: STRANGER | Trust: 5.5 | Rifts: 0.0 | Atmosphere: cool
-  Scores: aff=-8.6, sec=-6.6, aro=-14.9, dom=-3.5
-  Grid: [远·悬·静·进]
-  Injected: 我冷着，账我记着，等他哪天自己撞上来。屋里现在是凉的。
-
-Turn 06:
-  User: "你根本不懂我在说什么。"
-  Event: criticism | Stage: STRANGER | Trust: 0.0 | Rifts: 15.0 | Atmosphere: cool
-  Scores: aff=-42.6, sec=-31.0, aro=+1.3, dom=-25.3
-  Grid: [远·悬·静·收]
-  Injected: 我不想说话，缩在一边，等他先开口。屋里现在是凉的。
-
-Turn 07:
-  User: "呵呵"
-  Event: cold | Stage: STRANGER | Trust: 0.0 | Rifts: 15.0 | Atmosphere: cool
-  Scores: aff=-62.5, sec=-46.5, aro=-14.8, dom=-35.2
-  Grid: [远·悬·静·收]
-  Injected: 我不想说话，缩在一边，等他先开口。屋里现在是凉的。
-
-Turn 08:
-  User: "对不起，刚才是我情绪太差，是我不好。"
-  Event: apology | Stage: STRANGER | Trust: 3.0 | Rifts: 5.0 | Atmosphere: cool
-  Scores: aff=-40.0, sec=-24.8, aro=-28.6, dom=-44.4
-  Grid: [远·悬·静·收]
-  Injected: 我不想说话，缩在一边，等他先开口。屋里现在是凉的。
-
-Turn 09:
-  User: "谢谢你一直陪着我，你真好。"
-  Event: praise | Stage: STRANGER | Trust: 7.0 | Rifts: 5.0 | Atmosphere: neutral
-  Scores: aff=-10.2, sec=-0.8, aro=+8.7, dom=-28.9
-  Grid: [远·悬·静·收]
-  Injected: 我不想说话，缩在一边，等他先开口。
-
-Turn 10:
-  User: "隔了这么久，好久不见啊！"
-  Event: reunion | Stage: FAMILIAR | Trust: 10.0 | Rifts: 5.0 | Atmosphere: neutral
-  Scores: aff=+11.1, sec=-12.8, aro=+26.0, dom=-36.6
-  Grid: [近·悬·热·收]
-  Injected: 我特别想凑过去，一想到他可能嫌我黏，话又咽回去了。
-```
-
-### 命令
-
-```text
-/emotion                   查看当前分数、坐标和注入块
-/emotion set 60 20 25 5    手动设置四轴
+# 官方插件规范校验
+hermes plugins validate . && hermes plugins doctor .
 ```
 
 ---
 
-## 七、边界
+## 六、License
 
-- **不编造共同经历**：只描述此刻的感觉，不写"你上次怎么伤我"
-- **不替代记忆**：长期事实仍归 `MEMORY` / 记忆插件
-- **不上传**：状态只在本机；除续写那一次模型调用外不外发
-- **失败可退**：模型不可用时只输出固定段
-- **可关**：关掉开关，注入立刻消失，状态保留
-
----
-
-## 八、License
-
-MIT
+MIT License

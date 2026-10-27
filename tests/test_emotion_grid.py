@@ -241,7 +241,7 @@ def test_narrator_override_denied_falls_back(tmp_state):
     mod = load_plugin()
     llm = Denied()
     ctx = FakeCtx({"state_path": str(tmp_state), "state_source": "manual",
-                   "narrator_model": "gpt-6-luna", "narrator_provider": "openai-codex"},
+                   "narrator_model": "some-model", "narrator_provider": "some-provider"},
                   llm=llm)
     mod.register(ctx)
     hook = ctx.hooks["pre_llm_call"]

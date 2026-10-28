@@ -132,6 +132,7 @@ _threads_lock = threading.Lock()
 
 
 def wait_for_narrator_threads(timeout_s: float = 1.0) -> None:
+    """Join both narrator paths: the legacy JSON worker and the engine's persona worker."""
     with _threads_lock:
         threads = list(_active_threads)
     for t in threads:
@@ -139,6 +140,10 @@ def wait_for_narrator_threads(timeout_s: float = 1.0) -> None:
             t.join(timeout=timeout_s)
     with _threads_lock:
         _active_threads[:] = [t for t in _active_threads if t.is_alive()]
+    try:
+        persona_grid.join_all_narrator_threads(timeout=timeout_s)
+    except Exception:  # engine unavailable (non-internal modes)
+        pass
 
 
 def _call_with_profile_scope(fn: Any) -> Any:

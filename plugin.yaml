@@ -1,5 +1,5 @@
 name: hermes-emotion
-version: 0.3.0
+version: 0.3.1
 description: "给 Hermes 一个自包含的完整情绪模型：四轴 4D 引擎 + 关系演化 + 16 格人设 + 时间感知 + 天气感知 + 焦点追踪 + 成人模式。状态存入独立库，不依赖外部核心库。"
 author: "isKoge"
 license: MIT

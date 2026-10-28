@@ -1143,9 +1143,10 @@ def trigger_narrator_async(
                     return
 
                 if raw_text is None:
+                    wired = persona_narrator_caller is not _default_call_persona_narrator
                     logger.warning(
-                        "[persona_grid] narrator request failed: category=empty_response token=%s session=%s",
-                        token, session_id,
+                        "[persona_grid] narrator request failed: category=empty_response token=%s session=%s caller_wired=%s",
+                        token, session_id, wired,
                     )
                     return
 

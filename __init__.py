@@ -141,6 +141,34 @@ def wait_for_narrator_threads(timeout_s: float = 1.0) -> None:
         _active_threads[:] = [t for t in _active_threads if t.is_alive()]
 
 
+def _call_with_profile_scope(fn: Any) -> Any:
+    """Run a model call inside this profile's secret scope.
+
+    Narrator work runs on a background thread. In multiplex mode the host fails closed
+    when a secret (provider key / base URL) is read with no scope installed, so the aux
+    call must bind the owning profile's scope explicitly instead of inheriting it.
+    """
+    token = None
+    try:
+        from agent.secret_scope import build_profile_secret_scope, set_secret_scope
+        from hermes_constants import get_hermes_home
+
+        home = Path(get_hermes_home())
+        token = set_secret_scope(build_profile_secret_scope(home), profile_home=str(home))
+    except Exception as exc:  # host without scope plumbing (older builds / tests)
+        logger.debug("[emotion] could not bind profile secret scope: %s", exc)
+    try:
+        return fn()
+    finally:
+        if token is not None:
+            try:
+                from agent.secret_scope import reset_secret_scope
+
+                reset_secret_scope(token)
+            except Exception:
+                pass
+
+
 def _complete(ctx: Any, prompt: str, timeout_s: float) -> Optional[str]:
     c = ctx or _plugin_ctx
     if c is None:
@@ -153,7 +181,7 @@ def _complete(ctx: Any, prompt: str, timeout_s: float) -> Optional[str]:
     model = str(_cfg(c, "narrator_model", "") or "").strip()
     kwargs: Dict[str, Any] = {
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 220,
+        "max_tokens": 800,  # reasoning models burn the budget on thinking; 220 left no room for content
         "purpose": f"{_NAME}.narrator",
         "timeout": timeout_s,
     }
@@ -165,29 +193,43 @@ def _complete(ctx: Any, prompt: str, timeout_s: float) -> Optional[str]:
     import concurrent.futures
 
     def _call(call_kwargs: Dict[str, Any]) -> Any:
-        return llm.complete(**call_kwargs)
+        return _call_with_profile_scope(lambda: llm.complete(**call_kwargs))
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
         future = executor.submit(_call, kwargs)
         result = future.result(timeout=timeout_s)
-        return getattr(result, "text", None) or (result if isinstance(result, str) else None)
+        text = getattr(result, "text", None) or (result if isinstance(result, str) else None)
+        if not text:
+            logger.warning(
+                "[emotion] narrator empty model output: type=%s provider=%s model=%s usage=%s",
+                type(result).__name__, getattr(result, "provider", "?"),
+                getattr(result, "model", "?"), getattr(result, "usage", "?"),
+            )
+        return text
     except concurrent.futures.TimeoutError:
         logger.warning("[emotion] narrator call timed out after %.1fs", timeout_s)
         return None
     except Exception as exc:
         if provider or model:
-            logger.info("[emotion] override denied/failed (%s); retrying on the active model", exc)
+            logger.warning("[emotion] narrator override denied/failed (%s); retrying on the active model", exc)
             try:
                 fallback_kwargs = {
                     "messages": kwargs["messages"],
-                    "max_tokens": 220,
+                    "max_tokens": 800,  # reasoning models burn the budget on thinking; 220 left no room for content
                     "purpose": kwargs["purpose"],
                     "timeout": timeout_s,
                 }
                 future = executor.submit(_call, fallback_kwargs)
                 result = future.result(timeout=timeout_s)
-                return getattr(result, "text", None) or None
+                text = getattr(result, "text", None) or (result if isinstance(result, str) else None)
+                if not text:
+                    logger.warning(
+                        "[emotion] narrator fallback also empty: type=%s provider=%s model=%s usage=%s",
+                        type(result).__name__, getattr(result, "provider", "?"),
+                        getattr(result, "model", "?"), getattr(result, "usage", "?"),
+                    )
+                return text
             except Exception as exc2:
                 logger.warning("[emotion] narrator call fallback failed: %s", exc2)
                 return None

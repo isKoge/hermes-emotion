@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -409,6 +410,81 @@ def _update_last_active(ts: datetime, db_path: str) -> None:
         pass
 
 
+_NEGATIVE_EVENT_TYPES = frozenset({"cold", "hurtful", "criticism"})
+_history_dedupe: Dict[str, Tuple[str, float]] = {}
+def _message_fingerprint(message: Any) -> str:
+    import hashlib
+    return hashlib.sha1(str(message).encode("utf-8", "ignore")).hexdigest()[:12]
+
+
+def _history_boundary(history: Any) -> str:
+    """Fingerprint the tail of the prior conversation, or "" when unavailable.
+
+    Turn identity must not come from a timer: a repeated "嗯" on the next turn and a
+    duplicate hook call inside one turn look identical in time. The prior assistant/user
+    tail does differ between turns, so it is folded into the key instead.
+    """
+    if not isinstance(history, (list, tuple)) or not history:
+        return ""
+    tail = history[-2:] if len(history) >= 2 else history[-1:]
+    parts: List[str] = []
+    for item in tail:
+        if isinstance(item, dict):
+            role = item.get("role") or item.get("sender") or ""
+            content = item.get("content")
+            if isinstance(content, (list, tuple)):
+                content = " ".join(str(part) for part in content)
+            parts.append(f"{role}:{content}")
+        else:
+            parts.append(str(item))
+    return _message_fingerprint("\x00".join(parts))
+
+
+def _record_score_snapshot(
+    *,
+    sess: str,
+    turn_id: str,
+    event_type: str,
+    scores: Dict[str, Any],
+    coords: Any,
+    db_path: str,
+    history_len: Optional[int] = None,
+    user_message: str = "",
+    conversation_history: Any = None,
+) -> None:
+    """Append one 4D snapshot per turn, tolerating repeated hook calls.
+
+    Deduped on the engine's own output plus event type (and turn_id when supplied), because
+    the hook payload carries no stable turn identity: history length repeats under context
+    compression, and tool loops change it mid-turn.
+    """
+    # Turn identity is not available in the pre_llm_call payload, and neither history length
+    # nor a timer can supply it (compression repeats lengths; tool loops move them). What we
+    # do have is the engine's own output: scores are a deterministic function of the event and
+    # turn_index, so a repeated hook call inside one turn reproduces the same 4-tuple, while a
+    # new turn (new turn_index, and decay applied to the previous state) does not.
+    # Only a real turn_id can prove "same turn": without one, record every call rather than
+    # silently dropping a snapshot that might belong to a genuinely new turn.
+    key = ""
+    if turn_id:
+        key = "|".join(
+            [
+                f"tid:{turn_id}",
+                event_type,
+                ",".join(f"{float(scores.get(k, 0.0)):.6f}" for k in ("aff", "sec", "aro", "dom")),
+            ]
+        )
+    now_mono = time.monotonic()
+    last = _history_dedupe.get(sess)
+    if key and last and last[0] == key:
+        return
+    store.append_score_history(
+        scores, session_id=sess, event_type=event_type, coords=coords, db_path=db_path,
+    )
+    if key:
+        _history_dedupe[sess] = (key, now_mono)
+
+
 def _record_event(event_type: str, db_path: str) -> None:
     try:
         conn = store.get_connection(db_path)
@@ -501,6 +577,10 @@ def pre_llm_call(session_id: str = "", user_message: str = "", conversation_hist
             if res is not None:
                 _set_cached_turn_context(sess, str(turn_id), res)
             return res
+    # Without a turn_id every call steps the engine: Hermes' own payload always supplies one
+    # (agent/turn_context.py: pre_llm_call passes turn_id), so this path is for direct callers
+    # and tests only. Reusing results here would swallow genuine consecutive turns that share
+    # the same short message.
     return _inject(
         _plugin_ctx, sess, user_message or "",
         conversation_history=conversation_history,
@@ -680,11 +760,17 @@ def _inject(ctx: Any, session_id: str, user_message: str, **kwargs: Any) -> Opti
                     _last_session_event[sess] = event["type"]
                     l1 = relationship_engine.update_relationship(event, l1)
                     mod = relationship_engine.compute_modulation(l1)
+                    raw_amp = _cfg(ctx, "score_amplitude", EE.EMOTION_AMPLITUDE)
+                    try:
+                        amplitude = float(raw_amp) if raw_amp not in (None, "") else EE.EMOTION_AMPLITUDE
+                    except (TypeError, ValueError):
+                        amplitude = EE.EMOTION_AMPLITUDE
                     l2 = EE.emotion_step(
                         event, mod, l2,
                         adult_mode=adult_enabled,
                         session_id=sess,
                         turn_index=int(kwargs.get("turn_index", 0)),
+                        amplitude=amplitude,
                     )
                     if reunion:
                         l2["aff"] = max(-100.0, min(100.0, l2["aff"] + reunion["aff_boost"]))
@@ -694,7 +780,7 @@ def _inject(ctx: Any, session_id: str, user_message: str, **kwargs: Any) -> Opti
                         adult_machine = adult_mode.get_adult_state()
                         adult_machine.transition(
                             event["type"], event.get("intensity", 0.5),
-                            user_is_positive=event["type"] not in ("cold", "hurtful"),
+                            user_is_positive=event["type"] not in _NEGATIVE_EVENT_TYPES,
                         )
                         adult_mode.get_user_profile().update_from_event(event["type"], 1)
                         adult_mode.get_desire_stack().tick_decay()
@@ -722,6 +808,22 @@ def _inject(ctx: Any, session_id: str, user_message: str, **kwargs: Any) -> Opti
 
                     coords = persona_grid.discretize_coordinates(
                         l2["aff"], l2["sec"], l2["aro"], l2["dom"], bands=bands
+                    )
+                    # Snapshot every turn: emotion_engine is a single upserted row, so this
+                    # table is the only place the trajectory is visible. Guard against the
+                    # host calling pre_llm_call twice for one turn (tool loops): dedupe on
+                    # turn_id when supplied, else on a short same-session window.
+                    _raw_history = kwargs.get("conversation_history")
+                    _record_score_snapshot(
+                        sess=sess,
+                        turn_id=str(kwargs.get("turn_id") or ""),
+                        history_len=len(_raw_history) if isinstance(_raw_history, (list, tuple)) else None,
+                        user_message=msg,
+                        conversation_history=_raw_history,
+                        event_type=event["type"],
+                        scores=l2,
+                        coords=coords,
+                        db_path=db_path,
                     )
 
                     # In internal mode, true engine l2 is authoritative.
@@ -1032,11 +1134,70 @@ def register(ctx: Any) -> None:
                 f"目标数据库: {result.get('target_db')}"
             )
 
+    _SPARK = "▁▂▃▄▅▆▇█"
+
+    def _sparkline(values: List[float], lo: float = -100.0, hi: float = 100.0) -> str:
+        if not values:
+            return ""
+        span = (hi - lo) or 1.0
+        out = []
+        for v in values:
+            try:
+                num = float(v)
+            except (TypeError, ValueError):
+                num = lo
+            if not math.isfinite(num):
+                num = lo
+            idx = int(round((num - lo) / span * (len(_SPARK) - 1)))
+            out.append(_SPARK[max(0, min(len(_SPARK) - 1, idx))])
+        return "".join(out)
+
+    def show_history(raw: str = "") -> str:
+        parts = str(raw or "").strip().split()
+        try:
+            limit = int(parts[0]) if parts else 40
+        except ValueError:
+            limit = 40
+        limit = max(2, min(400, limit))
+
+        try:
+            db_path = store.get_db_path(ctx)
+            store.ensure_schema(db_path)
+            rows = store.load_score_history(limit, db_path=db_path, strict=True)
+        except Exception:  # health: allow BLE001 -- a broken db must not break the command
+            logger.warning("[emotion] history unavailable", exc_info=True)
+            return "分数历史读不出来（数据库不可用或被占用），情绪本身不受影响。"
+        if not rows:
+            return "还没有分数历史，聊两句就会开始记（每轮一条快照）。"
+
+        axes = (("aff", "好感"), ("sec", "安全感"), ("aro", "唤醒"), ("dom", "支配"))
+        head = rows[0]
+        tail = rows[-1]
+        lines = [f"最近 {len(rows)} 轮（每轮一条快照，最右为最新）：", ""]
+        for key, name in axes:
+            series = [r[key] for r in rows]
+            lines.append(
+                f"{name:<3} {_sparkline(series)}  "
+                f"{head[key]:.1f} → {tail[key]:.1f} ({tail[key] - head[key]:+.1f})"
+            )
+        span_seconds = len(rows)
+        events: Dict[str, int] = {}
+        for r in rows:
+            et = r.get("event_type") or "?"
+            events[et] = events.get(et, 0) + 1
+        top = "、".join(f"{k}×{v}" for k, v in sorted(events.items(), key=lambda kv: -kv[1])[:5])
+        lines.append("")
+        lines.append(f"事件分布: {top}")
+        lines.append(f"窗口: {head.get('created_at') or '?'} → {tail.get('created_at') or '?'}（{span_seconds} 轮）")
+        return "\n".join(lines)
+
     def command(raw: str = "") -> str:
         text = str(raw or "").strip()
         lower = text.lower()
         if lower.startswith("set"):
             return set_scores(text[3:])
+        if lower.startswith("history"):
+            return show_history(text[7:])
         if lower.startswith("migrate"):
             return run_migrate(text[7:])
         return show()
@@ -1047,8 +1208,8 @@ def register(ctx: Any) -> None:
             register_command(
                 name="emotion",
                 handler=command,
-                description="查看/设置情绪状态或从旧版迁移：/emotion set <aff> <sec> <aro> <dom>；/emotion migrate [path]",
-                args_hint="[set aff sec aro dom | migrate [path]]",
+                description="查看情绪状态与分数历史曲线：/emotion 看状态，/emotion history [N] 看四轴走势；另有 /emotion set <aff> <sec> <aro> <dom>、/emotion migrate [path]",
+                args_hint="[history [N] | set aff sec aro dom | migrate [path]]",
             )
         except Exception:
             logger.debug("[emotion] register_command failed", exc_info=True)

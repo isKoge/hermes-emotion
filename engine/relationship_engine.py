@@ -26,13 +26,14 @@ TRUST_DELTA: Dict[str, float] = {
     "tease": 0.8,
     "cold": -1.5,
     "hurtful": -3.0,
+    "criticism": -6.0,
     "casual_chat": 0.0,
     "question": 0.0,
 }
 
 # Positive event types (for momentum + consecutive turns)
 POSITIVE_TYPES = {"praise", "tease", "vulnerable", "apology"}
-NEGATIVE_TYPES = {"cold", "hurtful"}
+NEGATIVE_TYPES = {"cold", "hurtful", "criticism"}
 
 # Modulation coefficients
 TRUST_MOD_MIN = 0.5

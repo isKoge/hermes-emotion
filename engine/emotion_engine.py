@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import math
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -17,8 +18,13 @@ from typing import Any, Dict, List, Optional, Tuple
 # ═══════════════════════════════════════════════════════════════════
 
 EMOTION_CAP_DENOM = 120.0
-EMOTION_DECAY = 0.015
+EMOTION_DECAY = 0.02
 SINGLE_TURN_CLAMP = 10.0
+# Saturated axes used to collapse to cap_scale 0.1 (a ~10x damper), so a score parked at
+# 100 could never move. Keep a floor, and scale the stimulus: without both, real turns
+# drift ~1 point and the 16-cell grid stays stuck in one cell forever.
+EMOTION_CAP_SCALE_FLOOR = 0.35
+EMOTION_AMPLITUDE = 2.5
 NOISE_MAX = 1.5
 NOISE_THRESHOLD_ABS = 50.0
 
@@ -33,6 +39,7 @@ BASE_STIMULUS: Dict[str, Dict[str, float]] = {
     "casual_chat":    {"aff": 0.8,  "sec": 0.5,  "aro": 1.5,  "dom": 0.0},
     "cold":           {"aff": -5.0, "sec": -6.5, "aro": -1.5, "dom": -2.0},
     "hurtful":        {"aff": -10.0,"sec": -11.0,"aro": 7.5,  "dom": 5.5},
+    "criticism":      {"aff": -9.0, "sec": -7.0, "aro": 5.0,  "dom": -6.0},
     "apology":        {"aff": 4.5,  "sec": 6.5,  "aro": -2.0, "dom": -3.5},
     "vulnerable":     {"aff": 10.0, "sec": -2.0, "aro": -1.0, "dom": -5.0},
     "question":       {"aff": 0.8,  "sec": 0.8,  "aro": 2.0,  "dom": 0.0},
@@ -74,8 +81,15 @@ EMOTION_KEYWORDS: Dict[str, List[re.Pattern]] = {
     "apology": [
         re.compile(r"(对不起|我错了|抱歉|原谅我|是我的错|别生气|我不好)"),
     ],
+    "criticism": [
+        re.compile(r"(你根本不懂|你不懂我|根本不在乎|从来不听|总是这样|说了多少遍)"),
+        re.compile(r"(指望不上|你做不到|你又忘了|你怎么回事|别解释了)"),
+    ],
     "cold": [
-        re.compile(r"^(嗯|哦|好|行|知道了|随便|无所谓)$"),
+        # single-word/short brush-offs were falling through to casual_chat, which meant the
+        # scores barely moved on the turns that should hurt most
+        re.compile(r"^(嗯+|哦+|呵+|好|行|好吧|行吧|知道了|随便|随便吧|无所谓)$"),
+        re.compile(r"^(呵呵|呵|不想说)$"),
     ],
     "question": [
         re.compile(r"[?？]"),
@@ -204,6 +218,7 @@ def emotion_step(
     session_id: str = "default",
     turn_index: int = 0,
     decay_multiplier: float = 1.0,
+    amplitude: float = EMOTION_AMPLITUDE,
 ) -> Dict[str, Any]:
     """Execute 13-step emotion evolution equation."""
     event_type = event["type"]
@@ -217,20 +232,23 @@ def emotion_step(
     trust_mod = modulation.get("trustMod", 1.0)
     stage_weight = modulation.get("stageWeight", 1.0)
 
+    try:
+        amplitude = float(amplitude)
+    except (TypeError, ValueError):
+        amplitude = EMOTION_AMPLITUDE
+    if not math.isfinite(amplitude) or amplitude <= 0:
+        amplitude = EMOTION_AMPLITUDE
     delta: Dict[str, float] = {}
     for dim in ("aff", "sec", "aro", "dom"):
-        raw = base[dim]
+        raw = base[dim] * amplitude
         if dim in ("aff", "sec"):
             raw *= trust_mod
         raw *= stage_weight * intensity * sincerity
         delta[dim] = raw
 
     for dim in ("aff", "sec", "aro", "dom"):
-        cap_scale = max(0.1, 1.0 - abs(prev[dim]) / EMOTION_CAP_DENOM)
+        cap_scale = max(EMOTION_CAP_SCALE_FLOOR, 1.0 - abs(prev[dim]) / EMOTION_CAP_DENOM)
         delta[dim] *= cap_scale
-
-    for dim in ("aff", "sec", "aro", "dom"):
-        delta[dim] = max(-SINGLE_TURN_CLAMP, min(SINGLE_TURN_CLAMP, delta[dim]))
 
     rift_mod = modulation.get("riftMod", 1.0)
     for dim in ("aff", "sec"):
@@ -253,6 +271,14 @@ def emotion_step(
     if adult_mode and sensitivity <= 15:
         delta = _apply_ds_reversal(delta, event, sensitivity, personality_tags or [])
 
+    # Clamp last: atmosphere and D/S reversal used to run after it and could push a single
+    # turn past the declared ceiling (11.5 with default amplitude).
+    for dim in ("aff", "sec", "aro", "dom"):
+        value = delta[dim]
+        if not math.isfinite(value):
+            value = 0.0
+        delta[dim] = max(-SINGLE_TURN_CLAMP, min(SINGLE_TURN_CLAMP, value))
+
     decay = EMOTION_DECAY * decay_multiplier
     result: Dict[str, Any] = {}
     for dim in ("aff", "sec", "aro", "dom"):
@@ -266,7 +292,13 @@ def emotion_step(
             result[dim] += noise
 
     for dim in ("aff", "sec", "aro", "dom"):
-        result[dim] = max(-100.0, min(100.0, result[dim]))
+        # Decay and noise run after the stimulus clamp, so the per-turn ceiling has to be
+        # enforced on the final movement too -- otherwise a nonzero prev can drift past it.
+        change = result[dim] - prev[dim]
+        if not math.isfinite(change):
+            change = 0.0
+        change = max(-SINGLE_TURN_CLAMP, min(SINGLE_TURN_CLAMP, change))
+        result[dim] = max(-100.0, min(100.0, prev[dim] + change))
 
     result["primary_label"] = _label_emo(result["aff"], result["sec"], result["aro"], result["dom"])
 

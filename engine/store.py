@@ -8,10 +8,11 @@ Under no circumstances reads or writes to legacy core state databases.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import sqlite3
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 logger = logging.getLogger("hermes.plugins.hermes-emotion.store")
 
@@ -340,7 +341,148 @@ def ensure_schema(db_path: Optional[str | Path] = None) -> None:
                 created_at TEXT
             )
         """)
-
         conn.commit()
+
+        # Per-turn 4D snapshot: emotion_engine is a single upserted row, so without this
+        # there is no way to see where the scores came from or how fast they moved.
+        # Initialised separately and best-effort: a pre-existing score_history that does
+        # not match this shape (or a same-named view) must not break the whole engine.
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS score_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT,
+                    event_type TEXT,
+                    aff REAL NOT NULL,
+                    sec REAL NOT NULL,
+                    aro REAL NOT NULL,
+                    dom REAL NOT NULL,
+                    coords TEXT,
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_score_history_id ON score_history(id DESC)"
+            )
+            conn.commit()
+        except sqlite3.Error:  # history is optional telemetry, never load-bearing
+            logging.getLogger(__name__).warning(
+                "score_history unavailable; continuing without history", exc_info=True
+            )
     finally:
         conn.close()
+
+
+SCORE_HISTORY_KEEP = 2000
+
+
+def _finite_score(value: Any) -> Optional[float]:
+    """Coerce to a finite score inside [-100, 100], or None when the input is unusable.
+
+    Out-of-range values are rejected rather than clamped: silently rewriting 1000 into 100
+    would hide a broken writer instead of surfacing it.
+    """
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(num) or num < -100.0 or num > 100.0:
+        return None
+    return num
+
+
+def append_score_history(
+    scores: Mapping[str, float],
+    *,
+    session_id: str = "",
+    event_type: str = "",
+    coords: Sequence[str] | str = (),
+    db_path: Optional[str | Path] = None,
+    keep: int = SCORE_HISTORY_KEEP,
+) -> None:
+    """Record one per-turn 4D snapshot and trim the tail.
+
+    Never raises into the turn: a broken history table must not cost the caller a reply.
+    """
+    values = [_finite_score(scores.get(k, 0.0)) for k in ("aff", "sec", "aro", "dom")]
+    if any(v is None for v in values):
+        return
+    try:
+        conn = get_connection(db_path)
+        try:
+            coord_text = "".join(coords) if not isinstance(coords, str) else coords
+            conn.execute(
+                "INSERT INTO score_history (session_id, event_type, aff, sec, aro, dom, coords)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (session_id, event_type, *values, coord_text),
+            )
+            if keep > 0:
+                conn.execute(
+                    "DELETE FROM score_history WHERE id NOT IN"
+                    " (SELECT id FROM score_history ORDER BY id DESC LIMIT ?)",
+                    (int(keep),),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:  # health: allow BLE001 -- history is best-effort telemetry
+        logging.getLogger(__name__).debug("append_score_history failed", exc_info=True)
+
+
+def load_score_history(
+    limit: int = 60,
+    *,
+    db_path: Optional[str | Path] = None,
+    session_id: str = "",
+    strict: bool = False,
+) -> List[Dict[str, Any]]:
+    """Return up to ``limit`` snapshots in chronological order (oldest first).
+
+    ``strict=True`` propagates database errors so callers can tell "no history yet" apart
+    from "history is unreadable"; the default swallows them for best-effort callers.
+    """
+    try:
+        conn = get_connection(db_path)
+        try:
+            if session_id:
+                rows = conn.execute(
+                    "SELECT aff, sec, aro, dom, event_type, created_at FROM score_history"
+                    " WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                    (session_id, int(limit)),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT aff, sec, aro, dom, event_type, created_at FROM score_history"
+                    " ORDER BY id DESC LIMIT ?",
+                    (int(limit),),
+                ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        if strict:
+            raise
+        logging.getLogger(__name__).debug("load_score_history failed", exc_info=True)
+        return []
+    except Exception:  # health: allow BLE001 -- history is best-effort telemetry
+        if strict:
+            raise
+        logging.getLogger(__name__).debug("load_score_history failed", exc_info=True)
+        return []
+    out: List[Dict[str, Any]] = []
+    for r in reversed(rows):
+        # SQLite REAL columns happily store text/inf from an older writer: skip those rows
+        # instead of blowing up the command that reads them.
+        vals = [_finite_score(r[i]) for i in range(4)]
+        if any(v is None for v in vals):
+            continue
+        out.append(
+            {
+                "aff": vals[0],
+                "sec": vals[1],
+                "aro": vals[2],
+                "dom": vals[3],
+                "event_type": r[4],
+                "created_at": r[5],
+            }
+        )
+    return out

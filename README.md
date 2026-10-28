@@ -167,6 +167,36 @@ hermes plugins validate . && hermes plugins doctor .
 
 ---
 
-## 六、License
+## 六、集成注意：后台线程必须自绑 profile scope
+
+narrator（LLM 续写那段）跑在后台线程里，不是请求线程。Hermes 在多 profile 网关下对密钥读取是
+**fail-closed** 的：线程里没有安装 `_SECRET_SCOPE` 时，读任何 provider key 都会抛
+`UnscopedSecretError`（"Hermes could not read this profile's …"）。表现不是崩溃，而是
+`category=empty_response` —— 看起来像"模型返回空"，实际根本没发出请求。
+
+正确做法是在**调用点**绑定本 profile 的 scope，用完立刻还原（`_call_with_profile_scope`）：
+
+```python
+from agent.secret_scope import build_profile_secret_scope, set_secret_scope, reset_secret_scope
+from hermes_constants import get_hermes_home
+
+home = Path(get_hermes_home())
+token = set_secret_scope(build_profile_secret_scope(home), profile_home=str(home))
+try:
+    return llm.complete(**kwargs)
+finally:
+    reset_secret_scope(token)
+```
+
+两条相关经验：
+
+- **不要**用 `os.environ` 兜底密钥。那样会把 profile 隔离废掉，且在多 profile 下读到错误 profile 的值。
+- `max_tokens` 别抠太小。推理模型会把预算全花在 thinking 上，220 会导致正文为空；本插件用 800。
+- 模型覆盖（`provider`/`model`）需要宿主授权：`plugins.entries.<id>.llm.allow_provider_override`
+  与 `allow_model_override` 默认为 `false`，未开启时插件传的 provider/model 会被静默忽略。
+
+---
+
+## 七、License
 
 MIT License
